@@ -12,6 +12,9 @@ on:
     - cron: "0 14 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   audit:
     runs-on: ubuntu-latest
@@ -48,3 +51,13 @@ jobs:
         # HS-allowance). The advisory describes no condition that
         # applies to this usage.
         run: pip-audit --strict --ignore-vuln PYSEC-2025-183 .
+
+  # Alert (Telegram) ONLY on genuine post-merge breakage of the default
+  # branch. PR-branch reds (mid-fix commits, cross-repo lib-tag merge-order
+  # races) stay silent. Reusable workflow + transport in nousergon-lib.
+  # See alpha-engine-config#1128.
+  notify-main-failure:
+    needs: [audit]
+    if: ${{ failure() && github.ref == 'refs/heads/main' }}
+    uses: nousergon/nousergon-lib/.github/workflows/notify-ci-failure.yml@main
+    secrets: inherit
