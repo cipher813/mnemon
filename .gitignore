@@ -51,3 +51,7 @@ fly.toml
 # (real memory titles + snippets), must not be committed. Schema template
 # lives at tests/fixtures/capture_attention_pairs.example.json.
 tests/fixtures/capture_attention_pairs.json
+
+# CLAUDE.md is now AGENTS.md; CLAUDE.md is a local symlink only.
+# See config#2581 — LLM-specific config files must not be tracked.
+/CLAUDE.md
