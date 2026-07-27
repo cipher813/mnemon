@@ -50,7 +50,7 @@ def _free_port() -> int:
     """Reserve an ephemeral TCP port. The OS keeps it unlikely to be
     reused before the test server binds it."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
+        s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
 
