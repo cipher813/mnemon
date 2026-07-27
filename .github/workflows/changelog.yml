@@ -34,13 +34,13 @@ jobs:
           fetch-depth: 1
 
       - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@451ce7a2e72d8a729a59ebeaacab82dbce58e7af4c # v6
         with:
           role-to-assume: arn:aws:iam::711398986525:role/github-actions-lambda-deploy
           aws-region: us-east-1
 
       - name: Append to system-wide deploy changelog
-        uses: nousergon/nousergon-docs/.github/actions/append-changelog@main
+        uses: nousergon/nousergon-docs/.github/actions/append-changelog@6ed6c2050ecd4e87284283c7ee16539672704fc9 # main
         with:
           deploy_status: merged
           deploy_workflow: changelog.yml
