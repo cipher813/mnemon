@@ -38,10 +38,13 @@ Production (self-hosted AS)::
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 
 from .auth import OAuthConfig, OAuthMiddleware
+
+logger = logging.getLogger(__name__)
 
 PORT = int(os.environ.get("PORT", "8502"))
 
@@ -73,15 +76,16 @@ def run_remote() -> None:
     try:
         from .embedder import _get_model
 
-        print("Pre-loading embedding model...", file=sys.stderr)
+        logger.info("Pre-loading embedding model...")
         _get_model()
-        print("Embedding model ready.", file=sys.stderr)
+        logger.info("Embedding model ready.")
     except Exception as e:  # noqa: BLE001
-        print(
-            f"WARN: failed to pre-load embedding model "
-            f"({type(e).__name__}: {e}); first memory_search will pay "
+        logger.warning(
+            "failed to pre-load embedding model "
+            "(%s: %s); first memory_search will pay "
             "the load cost lazily",
-            file=sys.stderr,
+            type(e).__name__,
+            e,
         )
 
     # Eager NLI init for contradiction detection — non-fatal if it
@@ -92,15 +96,16 @@ def run_remote() -> None:
     try:
         from .nli import prewarm as nli_prewarm
 
-        print("Pre-loading NLI classifier...", file=sys.stderr)
+        logger.info("Pre-loading NLI classifier...")
         nli_prewarm()
-        print("NLI classifier ready.", file=sys.stderr)
+        logger.info("NLI classifier ready.")
     except Exception as e:  # noqa: BLE001
-        print(
-            f"WARN: failed to pre-load NLI classifier "
-            f"({type(e).__name__}: {e}); first memory_check_contradictions "
+        logger.warning(
+            "failed to pre-load NLI classifier "
+            "(%s: %s); first memory_check_contradictions "
             "will pay the load cost lazily",
-            file=sys.stderr,
+            type(e).__name__,
+            e,
         )
 
     config = OAuthConfig.from_env()
@@ -115,44 +120,34 @@ def run_remote() -> None:
     as_config = AuthorizationServerConfig.from_env()
     as_problems = as_config.validate()
     if as_problems:
-        print(
-            "ERROR: self-hosted AS enabled but misconfigured:\n  - "
-            + "\n  - ".join(as_problems),
-            file=sys.stderr,
+        logger.error(
+            "self-hosted AS enabled but misconfigured:\n  - %s",
+            "\n  - ".join(as_problems),
         )
         sys.exit(1)
 
-    print(
-        f"mnemon remote server starting on http://0.0.0.0:{PORT}/mcp",
-        file=sys.stderr,
-    )
+    logger.info("mnemon remote server starting on http://0.0.0.0:%d/mcp", PORT)
     if as_config.enabled:
-        print(
-            f"Auth: self-hosted Authorization Server enabled "
-            f"(issuer={as_config.issuer})",
-            file=sys.stderr,
+        logger.info(
+            "Auth: self-hosted Authorization Server enabled (issuer=%s)",
+            as_config.issuer,
         )
     if config.local_token:
-        print(
-            "Auth: local static bearer token enabled (MNEMON_LOCAL_TOKEN set)",
-            file=sys.stderr,
-        )
+        logger.info("Auth: local static bearer token enabled (MNEMON_LOCAL_TOKEN set)")
     if not as_config.enabled and not config.local_token:
-        print(
+        logger.warning(
             "Auth: DISABLED — do not expose this server to the public internet. "
             "Set MNEMON_AS_ENABLED=true (with MNEMON_AS_PASSPHRASE + "
             "MNEMON_PUBLIC_URL) to enable the self-hosted Authorization "
-            "Server, or MNEMON_LOCAL_TOKEN for headless bearer auth.",
-            file=sys.stderr,
+            "Server, or MNEMON_LOCAL_TOKEN for headless bearer auth."
         )
 
     try:
         import uvicorn
     except ImportError:
-        print(
-            "ERROR: uvicorn not installed. Install with `pip install "
-            "mnemon-memory[server]`.",
-            file=sys.stderr,
+        logger.error(
+            "uvicorn not installed. Install with `pip install "
+            "mnemon-memory[server]`."
         )
         sys.exit(1)
 
@@ -170,9 +165,10 @@ def run_remote() -> None:
     session_store = SessionStore(sessions_db)
     expired = session_store.expire_old()
     if expired:
-        print(
-            f"Pruned {expired} expired MCP session(s) from {sessions_db}",
-            file=sys.stderr,
+        logger.info(
+            "Pruned %d expired MCP session(s) from %s",
+            expired,
+            sessions_db,
         )
     # json_response=True flips StreamableHTTP into discrete request/
     # response mode (one POST → one JSON body, no long-lived SSE stream
@@ -212,12 +208,15 @@ def run_remote() -> None:
         security_settings=mcp.settings.transport_security,
         decay_fn=_decay_sweep,
     )
-    print(
-        f"MCP sessions persisted to {sessions_db} "
-        f"(survives cold-stops, TTL {session_store.ttl_seconds}s, "
-        f"periodic prune every {mcp._session_manager._expire_interval_seconds}s, "
-        f"periodic memory decay every {mcp._session_manager._decay_interval_seconds}s)",
-        file=sys.stderr,
+    logger.info(
+        "MCP sessions persisted to %s "
+        "(survives cold-stops, TTL %ss, "
+        "periodic prune every %ds, "
+        "periodic memory decay every %ds)",
+        sessions_db,
+        session_store.ttl_seconds,
+        mcp._session_manager._expire_interval_seconds,
+        mcp._session_manager._decay_interval_seconds,
     )
 
     mcp_app = mcp.streamable_http_app()
