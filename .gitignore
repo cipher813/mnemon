@@ -54,4 +54,9 @@ tests/fixtures/capture_attention_pairs.json
 
 # CLAUDE.md is now AGENTS.md; CLAUDE.md is a local symlink only.
 # See config#2581 — LLM-specific config files must not be tracked.
+# Agent operating instructions — local-only.
+# nous-ergon-ops/policies/repository-tiering-policy.md §5.3: these describe how WE
+# work (session state, private-overlay pointers, wind-down), not how a contributor
+# gets started. Contributor-facing guidance lives in CONTRIBUTING.md.
+/AGENTS.md
 /CLAUDE.md
