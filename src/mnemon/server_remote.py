@@ -119,6 +119,20 @@ def run_remote() -> None:
 
     as_config = AuthorizationServerConfig.from_env()
     as_problems = as_config.validate()
+    # Passphrase validation is a static method that takes only metadata
+    # (bool + int), so the passphrase value never flows through any
+    # code path that reaches a log sink (CodeQL py/clear-text-logging).
+    # Only run when the AS is enabled (mirrors the original validate()
+    # guard).
+    if as_config.enabled:
+        as_problems.extend(
+            AuthorizationServerConfig.validate_passphrase(
+                has_passphrase=bool(as_config.passphrase),
+                passphrase_length=len(as_config.passphrase)
+                if as_config.passphrase
+                else 0,
+            )
+        )
     if as_problems:
         logger.error(
             "self-hosted AS enabled but misconfigured:\n  - %s",
