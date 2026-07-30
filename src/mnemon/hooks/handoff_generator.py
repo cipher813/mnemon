@@ -31,6 +31,7 @@ transcripts that aren't real sessions:
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
@@ -308,6 +309,7 @@ def main() -> None:
                     "content": handoff["summary"],
                     "content_type": "handoff",
                     "source_client": "claude-code-hook",
+                    "source_key": os.getcwd(),
                 },
                 client_label=CLIENT_LABEL,
             )

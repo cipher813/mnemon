@@ -221,13 +221,71 @@ def run_remote() -> None:
     )
 
     mcp_app = mcp.streamable_http_app()
+
+    # ── Handoff REST endpoint ─────────────────────────────────────────────
+    # Sibling route on the same server so the session-hygiene restore hook
+    # (stdlib-only, Python 3.9) can fetch mnemon's narrative handoff without
+    # speaking the full MCP Streamable HTTP protocol.  The hook passes its
+    # cwd as a query param and gets back the most recent handoff whose
+    # source_key matches, or 404.  Auth via the same bearer token as the MCP
+    # path (handled by OAuthMiddleware wrapping the combined app below).
+
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse
+    from starlette.requests import Request
+    from starlette.routing import Mount, Route
+
+    async def _handoff_latest(request: Request) -> JSONResponse:
+        """GET /handoff/latest?cwd=<urlencoded-path>
+
+        Returns the most recent live handoff memory whose ``source_key``
+        matches *cwd*, or 404.  Content-type is ``application/json``.
+        """
+        cwd = request.query_params.get("cwd", "").strip()
+        if not cwd:
+            return JSONResponse({"error": "missing cwd parameter"}, status_code=400)
+
+        from .store import Store, _row_to_document
+
+        store = Store()
+        try:
+            row = store.db.execute(
+                """SELECT d.*, c.doc
+                   FROM documents d
+                   JOIN content c ON d.hash = c.hash
+                   WHERE d.invalidated_at IS NULL
+                     AND d.content_type = 'handoff'
+                     AND d.source_key = ?
+                   ORDER BY d.created_at DESC
+                   LIMIT 1""",
+                (cwd,),
+            ).fetchone()
+
+            if row is None:
+                return JSONResponse({"error": "not_found"}, status_code=404)
+
+            doc = _row_to_document(row)
+            return JSONResponse({
+                "doc_id": doc.id,
+                "title": doc.title,
+                "content": doc.content,
+                "created_at": doc.created_at,
+            })
+        finally:
+            store.close()
+
+    # Mount both the MCP app and the handoff endpoint behind the same
+    # OAuthMiddleware so /handoff/latest inherits the existing bearer-token
+    # auth — no new auth path to maintain.
+    combined = Starlette(routes=[
+        Route("/handoff/latest", _handoff_latest, methods=["GET"]),
+        Mount("/", app=mcp_app),
+    ])
+
     wrapped = OAuthMiddleware(
-        mcp_app,
+        combined,
         config,
         as_config=as_config,
-        # health_snapshot (not metrics) so the hourly /health probe
-        # triggers the gated request-path prune and reports a post-prune
-        # oldest_session_age_seconds — see PersistentSessionManager.health_snapshot.
         metrics_provider=mcp._session_manager.health_snapshot,
     )
     uvicorn.run(wrapped, host="0.0.0.0", port=PORT, log_level="info")
