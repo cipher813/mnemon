@@ -28,7 +28,7 @@ classifiers = [
     "Intended Audience :: Developers",
 ]
 dependencies = [
-    "mcp>=1.27,<2",  # <2: mcp 2.0.0 (2026-07-28) removed mcp.server.fastmcp — mnemon-ops-I34
+    "mcp>=1.27,<3",  # <2: mcp 2.0.0 (2026-07-28) removed mcp.server.fastmcp — mnemon-ops-I34
     "numpy>=1.24",
     "fastembed>=0.3",
     "httpx[socks]>=0.25",
