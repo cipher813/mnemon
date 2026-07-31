@@ -11,6 +11,9 @@ on:
     - cron: "0 14 * * 1"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   built-wheel:
     # Builds a wheel from the PR's source, installs it in a clean
