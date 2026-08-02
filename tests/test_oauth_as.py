@@ -43,7 +43,11 @@ class TestAuthorizationServerConfig:
         config = AuthorizationServerConfig.from_env()
         problems = config.validate()
         assert any("MNEMON_PUBLIC_URL" in p for p in problems)
-        assert any("MNEMON_AS_PASSPHRASE" in p for p in problems)
+        # Passphrase validation moved to validate_passphrase (config#2819)
+        pp_problems = AuthorizationServerConfig.validate_passphrase(
+            has_passphrase=False, passphrase_length=0
+        )
+        assert any("MNEMON_AS_PASSPHRASE" in p for p in pp_problems)
 
     def test_enabled_with_full_config_validates(self, monkeypatch, tmp_path):
         monkeypatch.setenv("MNEMON_AS_ENABLED", "true")
@@ -68,25 +72,18 @@ class TestAuthorizationServerConfig:
         AS has no rate limiting. A 6-char passphrase is brute-forceable;
         require 16+ chars and point users at secrets.token_urlsafe(32)
         in the error message so they know what to do."""
-        config = AuthorizationServerConfig(
-            enabled=True,
-            public_url="https://example.fly.dev",
-            passphrase="short",  # 5 chars
-            key_dir=tmp_path,
+        problems = AuthorizationServerConfig.validate_passphrase(
+            has_passphrase=True, passphrase_length=5
         )
-        problems = config.validate()
         assert any("too short" in p for p in problems)
         assert any("secrets.token_urlsafe" in p for p in problems)
 
-    def test_exactly_16_char_passphrase_accepted(self, tmp_path):
+    def test_exactly_16_char_passphrase_accepted(self):
         """Boundary: 16 chars is the minimum, not 17."""
-        config = AuthorizationServerConfig(
-            enabled=True,
-            public_url="https://example.fly.dev",
-            passphrase="x" * 16,
-            key_dir=tmp_path,
+        problems = AuthorizationServerConfig.validate_passphrase(
+            has_passphrase=True, passphrase_length=16
         )
-        assert config.validate() == []
+        assert problems == []
 
     def test_issuer_strips_trailing_slash(self):
         """Issuer claim must be exact — RFC 8414 requires no trailing
