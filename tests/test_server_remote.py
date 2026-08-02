@@ -1,5 +1,6 @@
 """Tests for remote HTTP server configuration."""
 
+import logging
 import os
 import sys
 from unittest.mock import MagicMock, patch
@@ -118,21 +119,23 @@ class TestRunRemoteBranches:
         monkeypatch.setattr("mnemon.embedder._get_model", lambda: object())
         monkeypatch.setattr("mnemon.nli.prewarm", lambda: None)
 
-    def test_happy_path_calls_uvicorn_run(self, monkeypatch, tmp_path, capsys):
+    def test_happy_path_calls_uvicorn_run(self, monkeypatch, tmp_path, caplog):
         self._base_env(monkeypatch, tmp_path)
         self._stub_models(monkeypatch)
         fake_run = MagicMock()
         monkeypatch.setattr("uvicorn.run", fake_run)
 
         from mnemon.server_remote import run_remote
+
+        caplog.set_level(logging.INFO)
         run_remote()
 
         fake_run.assert_called_once()
         # host/port forwarded; wrapped ASGI app passed positionally
         assert fake_run.call_args.kwargs.get("port") == int(os.environ.get("PORT", "8502"))
-        assert "local static bearer token enabled" in capsys.readouterr().err
+        assert "local static bearer token enabled" in caplog.text
 
-    def test_embedder_preload_failure_warns_but_continues(self, monkeypatch, tmp_path, capsys):
+    def test_embedder_preload_failure_warns_but_continues(self, monkeypatch, tmp_path, caplog):
         self._base_env(monkeypatch, tmp_path)
         monkeypatch.setattr(
             "mnemon.embedder._get_model",
@@ -142,11 +145,13 @@ class TestRunRemoteBranches:
         monkeypatch.setattr("uvicorn.run", MagicMock())
 
         from mnemon.server_remote import run_remote
+
+        caplog.set_level(logging.WARNING)
         run_remote()  # WARN, not fatal
 
-        assert "failed to pre-load embedding model" in capsys.readouterr().err
+        assert "failed to pre-load embedding model" in caplog.text
 
-    def test_nli_preload_failure_warns_but_continues(self, monkeypatch, tmp_path, capsys):
+    def test_nli_preload_failure_warns_but_continues(self, monkeypatch, tmp_path, caplog):
         self._base_env(monkeypatch, tmp_path)
         monkeypatch.setattr("mnemon.embedder._get_model", lambda: object())
         monkeypatch.setattr(
@@ -156,9 +161,11 @@ class TestRunRemoteBranches:
         monkeypatch.setattr("uvicorn.run", MagicMock())
 
         from mnemon.server_remote import run_remote
+
+        caplog.set_level(logging.WARNING)
         run_remote()
 
-        assert "failed to pre-load NLI classifier" in capsys.readouterr().err
+        assert "failed to pre-load NLI classifier" in caplog.text
 
     def test_as_misconfigured_exits(self, monkeypatch, tmp_path):
         self._base_env(monkeypatch, tmp_path)
