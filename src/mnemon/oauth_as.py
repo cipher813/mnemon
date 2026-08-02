@@ -120,21 +120,41 @@ class AuthorizationServerConfig:
         Callers should refuse to enable the AS when this returns a
         non-empty list — better to fail fast at boot than serve broken
         metadata.
+
+        Does NOT validate the passphrase — callers must check
+        ``validate_passphrase`` separately so the passphrase value never
+        flows through the same code path as logged validation output.
         """
         problems: list[str] = []
         if not self.enabled:
             return problems
         if not self.public_url:
             problems.append(f"{ENV_PUBLIC_URL} must be set when AS is enabled")
-        if not self.passphrase:
+        return problems
+
+    @staticmethod
+    def validate_passphrase(*, has_passphrase: bool,
+                            passphrase_length: int) -> list[str]:
+        """Validate passphrase config from metadata only (no value).
+
+        This method is deliberately a static method that takes only
+        non-sensitive metadata (boolean + integer) rather than the
+        passphrase string itself, so CodeQL's taint-tracking can see
+        that no password-classified data reaches any downstream log
+        sink.
+
+        Returns a list of problem strings (empty = passphrase is OK).
+        """
+        problems: list[str] = []
+        if not has_passphrase:
             problems.append(
                 f"{ENV_AS_PASSPHRASE} must be set when AS is enabled "
                 "(single-user login credential)"
             )
-        elif len(self.passphrase) < _MIN_PASSPHRASE_LEN:
+        elif passphrase_length < _MIN_PASSPHRASE_LEN:
             problems.append(
                 f"{ENV_AS_PASSPHRASE} is too short "
-                f"({len(self.passphrase)} chars, minimum {_MIN_PASSPHRASE_LEN}). "
+                f"(minimum {_MIN_PASSPHRASE_LEN} chars). "
                 "Generate a high-entropy value: "
                 "python -c \"import secrets; print(secrets.token_urlsafe(32))\""
             )
