@@ -37,7 +37,9 @@ from uuid import uuid4
 
 import anyio
 from anyio.abc import TaskStatus
+from mcp.server.connection import Connection
 from mcp.server.lowlevel.server import Server as MCPServer
+from mcp.server.runner import serve_connection, serve_loop
 from mcp.server.streamable_http import (
     MCP_SESSION_ID_HEADER,
     EventStore,
@@ -45,6 +47,8 @@ from mcp.server.streamable_http import (
 )
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.shared.jsonrpc_dispatcher import JSONRPCDispatcher
+from mcp_types.version import LATEST_HANDSHAKE_VERSION
 from starlette.requests import Request
 from starlette.types import Receive, Scope, Send
 
@@ -214,16 +218,18 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
     2. ``_handle_stateful_request`` is overridden to add a resume branch:
        a request with an unknown-in-memory but known-in-SQLite session
        ID is served by spawning a fresh transport keyed to the same ID,
-       running the MCP app with ``stateless=True`` so the server-side
-       session is born already-initialized and tool calls succeed
-       without a handshake round-trip.
+       running the MCP app against a born-ready connection so the
+       server-side session is born already-initialized and tool calls
+       succeed without a handshake round-trip (mcp 2.x dropped the
+       v1 ``stateless=True`` Server.run flag; we construct the
+       connection via ``Connection.from_envelope`` instead).
 
     The upstream new-session and 404 paths are otherwise untouched.
     """
 
     def __init__(
         self,
-        app: MCPServer[Any, Any],
+        app: MCPServer[Any],
         *,
         session_store: SessionStore,
         event_store: EventStore | None = None,
@@ -565,8 +571,12 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
 
         Mirrors the new-session path in upstream ``_handle_stateful_request``
         but reuses the supplied session_id instead of minting a fresh one
-        and runs the MCP app stateless so the server-side ServerSession
-        is born already-initialized.
+        and runs the MCP app against a born-ready connection so the
+        server-side session is born already-initialized — mcp 2.x dropped
+        v1's ``stateless=True`` ``Server.run`` flag, so we build a
+        ``Connection`` via ``Connection.from_envelope`` (initialized pre-set)
+        and drive ``serve_connection`` over it. Tool calls then succeed
+        without the client re-sending an InitializeRequest.
 
         Lock scope is deliberately narrow: ``_session_creation_lock`` is
         held only for the race-guard read + ``_server_instances`` write,
@@ -597,16 +607,33 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
                         transport.idle_scope = idle_scope
 
                     with idle_scope:
-                        # stateless=True is the resume trick: the
-                        # ServerSession is constructed with
-                        # InitializationState.Initialized so it does
-                        # not block waiting for an InitializeRequest
-                        # the client will never re-send.
-                        await self.app.run(
+                        # Born-ready resume: from_envelope pre-sets
+                        # ``initialized`` (and therefore
+                        # ``initialize_accepted``), so the init gate opens
+                        # without an InitializeRequest the client will
+                        # never re-send. The client's protocol era is
+                        # unknown on this path, so respond at the latest
+                        # handshake version (matching what a fresh
+                        # session would have negotiated). mnemon uses no
+                        # client-capability-gated features, so a resumed
+                        # session with no negotiated capabilities is a
+                        # no-op for our toolset.
+                        dispatcher = JSONRPCDispatcher(
                             read_stream,
                             write_stream,
-                            self.app.create_initialization_options(),
-                            stateless=True,
+                            inline_methods=frozenset({"initialize"}),
+                        )
+                        connection = Connection.from_envelope(
+                            LATEST_HANDSHAKE_VERSION,
+                            None,
+                            None,
+                            outbound=dispatcher,
+                        )
+                        await serve_connection(
+                            self.app,
+                            dispatcher,
+                            connection=connection,
+                            lifespan_state=self._lifespan_state,
                         )
 
                     if idle_scope.cancelled_caught:
@@ -692,11 +719,18 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
                         transport.idle_scope = idle_scope
 
                     with idle_scope:
-                        await self.app.run(
+                        # mcp 2.x rebuilt the session loop; serve_loop is
+                        # what the upstream stateful path drives (the old
+                        # Server.run(read, write, init_options,
+                        # stateless=...) signature is gone). Handles the
+                        # handshake era (fresh sessions initialize) and the
+                        # modern era from one loop.
+                        await serve_loop(
+                            self.app,
                             read_stream,
                             write_stream,
-                            self.app.create_initialization_options(),
-                            stateless=False,
+                            lifespan_state=self._lifespan_state,
+                            session_id=transport.mcp_session_id,
                         )
 
                     if idle_scope.cancelled_caught:
@@ -718,7 +752,7 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
                         del self._server_instances[transport.mcp_session_id]
 
         # Narrow lock: only the dict mutation needs to be serialized.
-        # transport.connect() / app.run() / transport.handle_request()
+        # transport.connect() / serve_loop() / transport.handle_request()
         # are all per-session — no shared state between concurrent
         # fresh-init requests.
         async with self._session_creation_lock:

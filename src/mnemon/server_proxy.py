@@ -44,11 +44,10 @@ import functools
 import inspect
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 
 from . import server as _local
 from .hooks._remote_client import call_tool_sync
-from .server import _build_transport_security
 
 # Generous timeout for interactive tool calls proxied to the remote.
 # Larger than the hooks' 8s budget: operations like memory_rebuild /
@@ -63,7 +62,7 @@ def _forward(tool_name: str, arguments: dict[str, Any]) -> str:
 
     Drops ``None``-valued optional arguments so the remote applies its
     own defaults (mirrors how the bare MCP client would omit them).
-    Raises on any failure — the caller (FastMCP) surfaces it to the MCP
+    Raises on any failure — the caller (MCPServer) surfaces it to the MCP
     client as a tool error. Never falls back to the local vault.
     """
     args = {k: v for k, v in arguments.items() if v is not None}
@@ -78,7 +77,7 @@ def _forward(tool_name: str, arguments: dict[str, Any]) -> str:
 
 def _make_proxy(local_fn):
     """Build a remote-forwarding wrapper with ``local_fn``'s exact
-    signature/docstring so FastMCP derives an identical tool schema."""
+    signature/docstring so MCPServer derives an identical tool schema."""
     name = local_fn.__name__
     sig = inspect.signature(local_fn)
 
@@ -91,15 +90,19 @@ def _make_proxy(local_fn):
     return wrapper
 
 
-def build_proxy() -> FastMCP:
-    """Construct the remote-proxy FastMCP instance.
+def build_proxy() -> MCPServer:
+    """Construct the remote-proxy MCPServer instance.
 
     Enumerates every tool registered on the local server and registers a
     remote-forwarding twin under the same name/schema. Returns a fresh
-    instance per call (cheap; FastMCP construction is in-process) so
+    instance per call (cheap; MCPServer construction is in-process) so
     tests can build in isolation.
+
+    stdio transport — mcp 2.x dropped ``transport_security`` from the
+    server constructor and stdio never needs it, so unlike the pre-2.x
+    FastMCP this takes no transport_security argument.
     """
-    mcp = FastMCP("mnemon", transport_security=_build_transport_security())
+    mcp = MCPServer("mnemon")
     for tool in _local.mcp._tool_manager.list_tools():
         mcp.tool()(_make_proxy(tool.fn))
     return mcp
