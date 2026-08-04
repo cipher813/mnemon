@@ -69,7 +69,7 @@ def run_remote() -> None:
     # override still wins.
     os.environ.setdefault("MNEMON_ALLOW_LOCAL_STORE", "1")
 
-    from .server import mcp
+    from .server import _transport_security, mcp
 
     # Eager embedder init — non-fatal if it fails (lazy load will retry
     # on first actual search call).
@@ -165,13 +165,24 @@ def run_remote() -> None:
         )
         sys.exit(1)
 
-    # Wire the persistent session manager BEFORE streamable_http_app() is
-    # called — FastMCP lazy-initializes the manager on first call and
-    # caches it. By assigning our subclass first, the lazy path is
-    # skipped and our manager handles all requests. This is what lets
-    # MCP sessions survive Fly auto_stop_machines: the in-memory dict
-    # gets replaced with a SQLite-persisted one, and unknown-but-issued
-    # session IDs are transparently resumed instead of 404'd.
+    # mcp 2.x rebuilt the streamable-http app assembly: unlike FastMCP 1.x
+    # (which lazy-initialized a session manager on first streamable_http_app()
+    # call, letting us pre-inject a subclass), the 2.x lowlevel Server's
+    # streamable_http_app() unconditionally constructs a plain
+    # StreamableHTTPSessionManager and caches it. So instead of calling
+    # mcp.streamable_http_app() we build the /mcp route ourselves, mounting
+    # our PersistentSessionManager directly. This is what lets MCP sessions
+    # survive Fly auto_stop_machines: the in-memory dict gets replaced with
+    # a SQLite-persisted one, and unknown-but-issued session IDs are
+    # transparently resumed instead of 404'd.
+    #
+    # The transport settings / event store / retry interval / stateless flag
+    # that FastMCP 1.x carried on `mcp.settings` are now explicit arguments
+    # to the session manager and app. mnemon uses none of the resumable-
+    # event-store machinery and never ran stateless-http, so those are the
+    # same values the 2.x default would use; security_settings comes from
+    # _build_transport_security() (the pre-2.x equivalent of
+    # mcp.settings.transport_security).
     from .config import vault_dir
     from .persistent_sessions import PersistentSessionManager, SessionStore
 
@@ -212,16 +223,20 @@ def run_remote() -> None:
         finally:
             store.close()
 
-    mcp._session_manager = PersistentSessionManager(
-        app=mcp._mcp_server,
+    session_manager = PersistentSessionManager(
+        app=mcp._lowlevel_server,
         session_store=session_store,
-        event_store=mcp._event_store,
-        retry_interval=mcp._retry_interval,
+        event_store=None,
+        retry_interval=None,
         json_response=True,
-        stateless=mcp.settings.stateless_http,
-        security_settings=mcp.settings.transport_security,
+        stateless=False,
+        security_settings=_transport_security,
         decay_fn=_decay_sweep,
     )
+    # Keep the lowlevel server's own manager pointer consistent with the app
+    # that is actually mounted (the MCPServer.session_manager property and
+    # any introspection read it).
+    mcp._lowlevel_server._session_manager = session_manager
     logger.info(
         "MCP sessions persisted to %s "
         "(survives cold-stops, TTL %ss, "
@@ -229,11 +244,23 @@ def run_remote() -> None:
         "periodic memory decay every %ds)",
         sessions_db,
         session_store.ttl_seconds,
-        mcp._session_manager._expire_interval_seconds,
-        mcp._session_manager._decay_interval_seconds,
+        session_manager._expire_interval_seconds,
+        session_manager._decay_interval_seconds,
     )
 
-    mcp_app = mcp.streamable_http_app()
+    # Build the Starlette app manually — the 2.x lowlevel streamable_http_app
+    # would otherwise overwrite `_session_manager` with a plain manager (see
+    # comment above). StreamableHTTPASGIApp applies the manager's request-path
+    # logic (including the 4 MiB body-limit middleware) to the /mcp route; the
+    # lifespan drives the persistent manager's periodic prune/decay tasks.
+    from mcp.server.streamable_http_manager import StreamableHTTPASGIApp
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+
+    mcp_app = Starlette(
+        routes=[Route("/mcp", endpoint=StreamableHTTPASGIApp(session_manager))],
+        lifespan=lambda app: session_manager.run(),
+    )
     wrapped = OAuthMiddleware(
         mcp_app,
         config,
@@ -241,6 +268,6 @@ def run_remote() -> None:
         # health_snapshot (not metrics) so the hourly /health probe
         # triggers the gated request-path prune and reports a post-prune
         # oldest_session_age_seconds — see PersistentSessionManager.health_snapshot.
-        metrics_provider=mcp._session_manager.health_snapshot,
+        metrics_provider=session_manager.health_snapshot,
     )
     uvicorn.run(wrapped, host="0.0.0.0", port=PORT, log_level="info")

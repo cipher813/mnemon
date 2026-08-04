@@ -12,7 +12,7 @@ import json
 import logging
 import os
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 from .safety import defang_doc
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 def _build_transport_security() -> TransportSecuritySettings | None:
     """Build TransportSecuritySettings from the MNEMON_ALLOWED_HOSTS env var.
 
-    FastMCP enables DNS rebinding protection by default with an empty
+    MCPServer enables DNS rebinding protection by default with an empty
     allowed_hosts list, which rejects every non-localhost request. When
     running behind a reverse proxy or cloud host (Fly, Render, etc.), set
     MNEMON_ALLOWED_HOSTS to a comma-separated list of allowed Host header
@@ -34,7 +34,7 @@ def _build_transport_security() -> TransportSecuritySettings | None:
         MNEMON_ALLOWED_HOSTS=mnemon-memory.fly.dev,*.fly.dev
 
     Wildcards use fnmatch-style patterns (``*`` matches any characters).
-    Returns None if the env var is unset, preserving FastMCP's default
+    Returns None if the env var is unset, preserving MCPServer's default
     localhost-only behavior for local development.
     """
     raw = os.environ.get("MNEMON_ALLOWED_HOSTS", "").strip()
@@ -51,7 +51,14 @@ def _build_transport_security() -> TransportSecuritySettings | None:
     )
 
 
-mcp = FastMCP("mnemon", transport_security=_build_transport_security())
+# mcp 2.x moved transport_security out of the server constructor and into the
+# transport call sites (streamable_http_app / run). stdio (run_stdio) never
+# needs it; server_remote.py passes it to the StreamableHTTP app + session
+# manager explicitly. Keep the resolved settings here as the single source of
+# truth so remote serving and any future SSE path read the same value.
+_transport_security = _build_transport_security()
+
+mcp = MCPServer("mnemon")
 
 # Lazy-initialized store (created on first tool call)
 _store: Store | None = None

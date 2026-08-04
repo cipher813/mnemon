@@ -141,9 +141,16 @@ async def _call_tool_async(
 
     Split out from :func:`call_tool_sync` so it can be patched directly in
     tests without monkey-patching the MCP SDK's async context managers.
+
+    mcp 2.x replaced v1's transport-plus-``ClientSession``-plus-
+    ``initialize()`` layering with a single ``Client`` object. Headers are
+    configured on an ``httpx2.AsyncClient`` passed to
+    ``streamable_http_client``; ``Client`` negotiates the protocol version
+    and runs the handshake automatically on enter.
     """
-    from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
+    import httpx2
+    from mcp import Client
+    from mcp.client.streamable_http import streamable_http_client
 
     url = get_remote_url()
     token = get_local_token()
@@ -153,14 +160,14 @@ async def _call_tool_async(
     }
 
     async def _run() -> str:
-        async with streamablehttp_client(url, headers=headers) as (
-            read,
-            write,
-            _close,
-        ):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                result = await session.call_tool(tool_name, arguments)
+        async with httpx2.AsyncClient(headers=headers) as http_client:
+            # streamable_http_client is itself the Transport the Client
+            # drives (an async context manager yielding the read/write
+            # streams); passing it as the server arg keeps the HTTP client
+            # (auth headers) alive for the whole call.
+            transport = streamable_http_client(url, http_client=http_client)
+            async with Client(transport) as client:
+                result = await client.call_tool(tool_name, arguments)
                 # MCP tool results contain a list of content blocks. The
                 # first text block is the one we want for memory_search /
                 # memory_save / etc. — all current mnemon tools return

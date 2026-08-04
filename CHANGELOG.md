@@ -1,5 +1,24 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- **MCP SDK 2.x compatibility.** mcp 2.0.0 (2026-07-28) removed
+  `mcp.server.fastmcp.FastMCP` (renamed `MCPServer`), removed v1's
+  `ClientSession`+`streamablehttp_client` client layering (replaced by the
+  unified `Client`), dropped the `stateless=` flag on the lowlevel
+  `Server.run`, and moved `transport_security`/`event_store`/`stateless`
+  out of the server constructor and into the transport call sites. mnemon
+  was migrated end-to-end: `server.py`/`server_proxy.py` now build an
+  `MCPServer`, `hooks/_remote_client.py` drives the new `Client` over an
+  `httpx2`-configured Streamable HTTP transport, and `persistent_sessions.py`
+  reimplements the cold-stop resume trick (born-already-initialized session)
+  via a born-ready `Connection.from_envelope`, since v2's session loop no
+  longer accepts `stateless=True`. `server_remote.py` now mounts the
+  `PersistentSessionManager` directly instead of pre-injecting it into a
+  FastMCP lazy path that no longer exists. The `mcp>=1.27,<3` upper bound
+  (relaxed from `<2`) lets the dependency resolver pick 2.x.
+
 ## [0.7.9] - 2026-07-13
 
 External-readiness audit — no behavior changes, packaging/docs only. Bumped
