@@ -76,7 +76,11 @@ jobs:
       - name: Install gitleaks
         run: |
           VERSION=8.30.1
-          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" -o /tmp/gitleaks.tar.gz
+          # --retry-all-errors is load-bearing: plain --retry declines to retry some
+          #   connection-level failures, and 56 (connection died) is one. Before this the
+          #   command had no retry at all — a first-attempt drop failed the job in 190ms
+          #   (alpha-engine-config-I7069).
+          curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --retry-max-time 120 "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" -o /tmp/gitleaks.tar.gz
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
           sudo install /tmp/gitleaks /usr/local/bin/gitleaks
           gitleaks version
