@@ -61,6 +61,39 @@ jobs:
         # model download fails that test fast instead of hanging the job.
         run: pytest tests/ -v --cov --cov-report=term-missing --timeout=300 --timeout-method=thread
 
+  # The declared dependency FLOOR, measured. `pip install -e .` above resolves
+  # to the newest mcp, so a floor that admits an unimportable version is
+  # invisible to the matrix: `mcp>=1.27` shipped while persistent_sessions.py
+  # imported mcp.server.connection (2.0+ only) — mnemon-I300. This leg pins
+  # the floor and runs the whole suite, so raising the floor is the only way
+  # to adopt a newer mcp API.
+  deps-floor:
+    runs-on: ubuntu-latest
+    env:
+      FASTEMBED_CACHE_DIR: ${{ github.workspace }}/.model-cache/fastembed
+      HF_HOME: ${{ github.workspace }}/.model-cache/hf
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cache embedder + NLI models
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.model-cache
+          key: mnemon-models-${{ runner.os }}-v1
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install at the declared mcp floor
+        run: |
+          set -euo pipefail
+          FLOOR=$(python3 -c 'import re,tomllib; d=tomllib.load(open("pyproject.toml","rb")); s=[x for x in d["project"]["dependencies"] if x.startswith("mcp")][0]; print(re.search(r">=([0-9.]+)", s).group(1))')
+          echo "mcp floor: $FLOOR"
+          pip install -e ".[dev]" "mcp==$FLOOR"
+          python -c 'import importlib.metadata as m; print("installed mcp", m.version("mcp"))'
+      - name: Import every mnemon module, then the suite, at the floor
+        run: |
+          pytest tests/test_import_walk.py -q
+          pytest tests/ -q --timeout=300 --timeout-method=thread
+
   secrets:
     runs-on: ubuntu-latest
 
