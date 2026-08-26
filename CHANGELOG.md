@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Hook inner timeout now fires before Claude Code's kill.** `HOOK_REMOTE_TIMEOUT_SEC`
+  was 8.0s — equal to the `timeout` `settings.json` grants `context_surfacing` — so the
+  inner `asyncio.wait_for` could never expire first and the hook's `⚠ mnemon unavailable`
+  branch was unreachable: 11 `hook_cancelled` in 1,075 prompts (2026-08-21 → 26), zero
+  warnings. Now 6.0s with a 1.5s tested margin (`HOOK_WALLCLOCK_BUDGET_SEC`,
+  `tests/test_hooks_timeout_budget.py`), which also checks the mirrored budget against the
+  live settings file when one exists.
+
 ### Changed
 - **MCP SDK 2.x compatibility.** mcp 2.0.0 (2026-07-28) removed
   `mcp.server.fastmcp.FastMCP` (renamed `MCPServer`), removed v1's

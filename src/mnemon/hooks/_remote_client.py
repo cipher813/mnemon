@@ -31,8 +31,9 @@ Behavior
 Each call goes through the MCP Streamable HTTP client, which opens a
 short-lived session, runs the MCP ``initialize`` handshake, calls the
 requested tool, and closes the session. The entire call is wrapped in a
-single ``asyncio.wait_for`` with a 2-second default timeout so hooks never
-block Claude Code's UI beyond the hook's own 8-second allowance.
+single ``asyncio.wait_for`` whose default (``config.HOOK_REMOTE_TIMEOUT_SEC``)
+sits below the hook's 8-second Claude Code allowance by a tested margin, so
+the timeout handler runs before Claude Code kills the process.
 
 All failures (network, timeout, auth, protocol errors) are surfaced to
 the caller as exceptions — the helper does not degrade silently. Hooks
