@@ -134,12 +134,30 @@ STANDING_TIER_BLOCKED_SOURCE_CLIENTS = HOOK_SOURCE_CLIENTS
 
 # Hook timeouts and budgets (seconds / chars)
 #
-# HOOK_REMOTE_TIMEOUT_SEC — matches Claude Code's ~/.claude/settings.json
-# hook timeout budget. Longer than the 2s the original plan called for
-# because Fly cold starts (wake machine + load FastEmbed ONNX) can take
-# 15-25s before the machine responds; 8s lets a warm machine always
-# succeed while a cold one surfaces a clean timeout.
-HOOK_REMOTE_TIMEOUT_SEC = 8.0
+# HOOK_WALLCLOCK_BUDGET_SEC — the `timeout` Claude Code's
+# ~/.claude/settings.json grants the tightest mnemon hook
+# (UserPromptSubmit → context_surfacing). When a hook exceeds it Claude
+# Code SIGKILLs the process and records `hook_cancelled`: no stdout, no
+# stderr, no additionalContext. Source of truth is the settings file
+# (claude-code-config/global/settings.json); this constant mirrors it so
+# the invariant below is testable here.
+HOOK_WALLCLOCK_BUDGET_SEC = 8.0
+
+# HOOK_REMOTE_TIMEOUT_SEC — the inner asyncio.wait_for on every remote
+# MCP call. Longer than the 2s the original plan called for because Fly
+# cold starts (wake machine + load FastEmbed ONNX) can take 15-25s before
+# the machine responds; a warm machine answers in ~1s.
+#
+# INVARIANT: strictly below HOOK_WALLCLOCK_BUDGET_SEC, with margin for
+# interpreter start-up (~0.3s) and the hook's own output write. From
+# 2026-05 to 2026-08-26 this was 8.0 == the budget, so the inner timeout
+# could never fire first: every slow call was killed by Claude Code
+# instead of reaching the hook's `⚠ mnemon unavailable` branch — 11
+# hook_cancelled across 1,075 prompts in a 5-day window and zero
+# instances of the warning the hook was designed to emit. Enforced by
+# tests/test_hooks_timeout_budget.py.
+HOOK_REMOTE_TIMEOUT_SEC = 6.0
+HOOK_TIMEOUT_MARGIN_SEC = 1.5
 
 # HOOK_DEDUP_TIMEOUT_SEC — tighter budget for the session_extractor
 # dedup check (memory_search against the Fly vault). Runs in a Stop
