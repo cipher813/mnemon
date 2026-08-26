@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Fixed
+- **`mcp` floor raised to `>=2.0`.** `>=1.27,<3` admitted a version `persistent_sessions.py`
+  cannot import (`mcp.server.connection` is 2.0+); on a 1.27 install three test modules
+  errored at collection and the four Claude Code hooks ran on that interpreter. New
+  `deps-floor` CI job installs `mcp==<declared floor>` and runs the suite; new
+  `tests/test_import_walk.py` imports every `mnemon.*` module (mnemon-I300).
 - **Hook inner timeout now fires before Claude Code's kill.** `HOOK_REMOTE_TIMEOUT_SEC`
   was 8.0s — equal to the `timeout` `settings.json` grants `context_surfacing` — so the
   inner `asyncio.wait_for` could never expire first and the hook's `⚠ mnemon unavailable`

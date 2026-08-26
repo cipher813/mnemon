@@ -29,8 +29,14 @@ classifiers = [
 ]
 dependencies = [
     # mcp 2.0.0 (2026-07-28) removed mcp.server.fastmcp; mnemon migrated to
-    # MCPServer (mnemon-ops-I34). Upper bound kept at <3 for the next major.
-    "mcp>=1.27,<3",
+    # MCPServer (mnemon-ops-I34). The floor is 2.0: persistent_sessions.py
+    # imports mcp.server.connection, which 1.x does not ship — a >=1.27
+    # floor admitted an install that failed at import (mnemon-I300; the
+    # laptop .venv sat on 1.27 with three test modules erroring at
+    # collection). ci.yml's `deps-floor` job installs mcp==2.0.0 and runs
+    # the suite so the floor is measured, not declared. Upper bound <3 for
+    # the next major.
+    "mcp>=2.0,<3",
     "numpy>=1.24",
     "fastembed>=0.3",
     "httpx[socks]>=0.25",
