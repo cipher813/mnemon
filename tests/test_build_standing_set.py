@@ -185,9 +185,25 @@ class TestParseJudgeResponse:
 
 
 class TestScoreViaLlmJudge:
-    """Tests for the LLM-judge backend (opt-in --judge llm / anthropic).
-    The krepis adapter is faked in sys.modules — no real key, SDK, or
-    network needed (krepis is an operator-side opt-in install)."""
+    """Tests for the LLM-judge backend (opt-in --judge llm).
+
+    Migrated 2026-08-29 (mnemon-I<N>) off a caller-pinned "provider:model"
+    spec string onto the krepis model-GROUP router
+    (``krepis.router.resolve_group_spec``), per Brian's 2026-08-29 ruling
+    that the fleet routes through the krepis router with no parallel
+    setups, and that direct-Anthropic API use is retired. The krepis
+    adapter (``krepis.llm``, ``krepis.llm_capture``, ``krepis.router``) is
+    faked in sys.modules — no real key, SDK, or network needed (krepis is
+    an operator-side opt-in install).
+
+    ``test_pre_fix_regressions`` pins the two defects the migration fixes
+    and fails against the pre-migration code: (1) ``LLMClient`` constructed
+    without the now-REQUIRED ``callsite_id`` kwarg, and (2) a direct
+    ``anthropic:`` spec string reachable at all. Both are asserted via the
+    fake's own contract rather than by re-importing pre-fix source, so the
+    test stays meaningful after the fix lands (it continues to assert the
+    fixed behavior, not just "did not crash").
+    """
 
     DOC = {"id": 1, "title": "T", "content": "C", "content_type": "preference"}
     RUBRIC_08 = (
@@ -195,34 +211,45 @@ class TestScoreViaLlmJudge:
         '"cross_domain": 4, "rationale": "solid"}'
     )
 
-    def _inject_fake_krepis(self, monkeypatch, complete_fn, captured=None):
-        """Register fake krepis.{llm,llm_capture,llm_config} modules so
-        the script's lazy imports resolve to stubs."""
+    def _inject_fake_krepis(
+        self, monkeypatch, complete_fn, captured=None, *, route="litellm_proxy",
+        provider="openrouter", model="deepseek/deepseek-v4-flash",
+    ):
+        """Register fake krepis.{llm,llm_capture,router} modules so the
+        script's lazy imports resolve to stubs. Mirrors the real contract:
+        ``resolve_group_spec(group, ...) -> (ModelSpec, route_dict)``, and
+        ``LLMClient(spec, callsite_id=...)`` REQUIRES callsite_id (matching
+        krepis>=0.59's real constructor, which raises on a missing/empty
+        one)."""
         import sys as _sys
         import types as _types
 
-        key_envs = {
-            "openrouter": "OPENROUTER_API_KEY",
-            "anthropic": "ANTHROPIC_API_KEY",
-        }
-
         constructed = []
+        resolve_calls = []
 
         class FakeClient:
-            def __init__(self, spec, **kw):
+            def __init__(self, spec, *, callsite_id=None, **kw):
+                if not isinstance(callsite_id, str) or not callsite_id.strip():
+                    raise TypeError(
+                        "LLMClient requires a non-empty callsite_id — it is "
+                        "the join key for cost attribution (krepis contract)."
+                    )
                 self.spec = spec
+                self.callsite_id = callsite_id
                 constructed.append(spec)
 
             def complete(self, **kw):
                 return complete_fn(**kw)
 
-        def parse_model_spec(value, source=""):
-            provider, model = value.split(":", 1)
-            return _types.SimpleNamespace(
-                provider=provider,
-                model=model,
-                resolved_api_key_env=lambda p=provider: key_envs[p],
+        def resolve_group_spec(group, *, exec_context=None, wire="openai",
+                                max_tokens=None, structured_outputs=None,
+                                requires=()):
+            resolve_calls.append(
+                {"group": group, "exec_context": exec_context, "wire": wire}
             )
+            spec = _types.SimpleNamespace(provider=provider, model=model)
+            route_dict = {"route": route}
+            return spec, route_dict
 
         def capture_llm_call(result, **kw):
             if captured is not None:
@@ -234,15 +261,15 @@ class TestScoreViaLlmJudge:
         llm_mod.LLMClient = FakeClient
         cap_mod = _types.ModuleType("krepis.llm_capture")
         cap_mod.capture_llm_call = capture_llm_call
-        cfg_mod = _types.ModuleType("krepis.llm_config")
-        cfg_mod.parse_model_spec = parse_model_spec
-        pkg.llm, pkg.llm_capture, pkg.llm_config = llm_mod, cap_mod, cfg_mod
+        router_mod = _types.ModuleType("krepis.router")
+        router_mod.resolve_group_spec = resolve_group_spec
+        pkg.llm, pkg.llm_capture, pkg.router = llm_mod, cap_mod, router_mod
 
         monkeypatch.setitem(_sys.modules, "krepis", pkg)
         monkeypatch.setitem(_sys.modules, "krepis.llm", llm_mod)
         monkeypatch.setitem(_sys.modules, "krepis.llm_capture", cap_mod)
-        monkeypatch.setitem(_sys.modules, "krepis.llm_config", cfg_mod)
-        return constructed
+        monkeypatch.setitem(_sys.modules, "krepis.router", router_mod)
+        return constructed, resolve_calls
 
     def _result(self, text):
         import types as _types
@@ -257,45 +284,40 @@ class TestScoreViaLlmJudge:
         import pytest as _p
         with _p.raises(RuntimeError, match=r"mnemon-memory\[judge\]"):
             bss._score_via_llm_judge(
-                [dict(self.DOC)], default_spec=bss.JUDGE_LLM_DEFAULT_SPEC
+                [dict(self.DOC)], group=bss.JUDGE_GROUP_DEFAULT
             )
 
-    def test_missing_api_key_raises_runtime_error(self, bss, monkeypatch):
-        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-        monkeypatch.delenv(bss.JUDGE_LLM_ENV, raising=False)
-        self._inject_fake_krepis(monkeypatch, lambda **kw: self._result("{}"))
-        import pytest as _p
-        with _p.raises(RuntimeError, match="OPENROUTER_API_KEY"):
-            bss._score_via_llm_judge(
-                [dict(self.DOC)], default_spec=bss.JUDGE_LLM_DEFAULT_SPEC
-            )
+    def test_anthropic_choice_removed_from_cli(self, bss):
+        """'anthropic' is no longer a legal --judge value — direct-Anthropic
+        is retired fleet-wide (2026-08-29 ruling)."""
+        with pytest.raises(SystemExit):
+            bss.build_arg_parser().parse_args(["--judge", "anthropic"])
 
-    def test_anthropic_alias_requires_anthropic_key(self, bss, monkeypatch):
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        monkeypatch.delenv(bss.JUDGE_LLM_ENV, raising=False)
-        self._inject_fake_krepis(monkeypatch, lambda **kw: self._result("{}"))
-        import pytest as _p
-        with _p.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
-            bss._score_via_llm_judge(
-                [dict(self.DOC)], default_spec=bss.JUDGE_LLM_ANTHROPIC_SPEC
-            )
+    def test_judge_group_env_selects_group(self, bss, monkeypatch):
+        constructed, resolve_calls = self._inject_fake_krepis(
+            monkeypatch, lambda **kw: self._result("{}"), provider="openrouter",
+            model="deepseek-v4-pro",
+        )
+        bss._score_via_llm_judge([dict(self.DOC)], group="med")
+        assert resolve_calls[0]["group"] == "med"
+
+    def test_default_group_is_low(self, bss):
+        assert bss.JUDGE_GROUP_DEFAULT == "low"
 
     def test_happy_path_scores_each_doc(self, bss, monkeypatch):
-        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-real")
-        monkeypatch.delenv(bss.JUDGE_LLM_ENV, raising=False)
         seen_calls = []
 
         def complete(**kw):
             seen_calls.append(kw)
             return self._result(self.RUBRIC_08)
 
-        constructed = self._inject_fake_krepis(monkeypatch, complete)
+        constructed, resolve_calls = self._inject_fake_krepis(monkeypatch, complete)
         scores = bss._score_via_llm_judge(
             [
                 {"id": 1, "title": "A", "content": "first", "content_type": "preference"},
                 {"id": 2, "title": "B", "content": "second", "content_type": "decision"},
             ],
-            default_spec=bss.JUDGE_LLM_DEFAULT_SPEC,
+            group="low",
         )
         assert scores[1] == pytest.approx(0.8)
         assert scores[2] == pytest.approx(0.8)
@@ -304,61 +326,134 @@ class TestScoreViaLlmJudge:
         assert seen_calls[0]["system"] == bss.JUDGE_RUBRIC_PROMPT
         assert "first" in seen_calls[0]["user_content"]
         assert seen_calls[0]["max_tokens"] == bss.JUDGE_MAX_TOKENS
-        # default spec resolved to the open-weight OpenRouter judge
+        # resolved via the router, group "low", never a pinned spec string
+        assert resolve_calls[0]["group"] == "low"
         assert constructed[0].provider == "openrouter"
+        # cost-attribution join key was supplied (krepis-required contract)
+        # — proven by FakeClient not raising; see test_pre_fix_regressions
+        # for the explicit negative case.
 
-    def test_env_override_wins(self, bss, monkeypatch):
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
-        monkeypatch.setenv(bss.JUDGE_LLM_ENV, "anthropic:claude-haiku-4-5")
-        constructed = self._inject_fake_krepis(
-            monkeypatch, lambda **kw: self._result(self.RUBRIC_08)
+    def test_non_compelled_route_refused(self, bss, monkeypatch):
+        """A group that resolves outside {litellm_proxy, egress_proxy}
+        (e.g. krepis's own fallback landing on a bare direct-provider
+        route) is refused rather than silently called —
+        alpha-engine-config-I6367 / the $0 direct-Anthropic budget."""
+        self._inject_fake_krepis(
+            monkeypatch, lambda **kw: self._result("{}"),
+            route="openrouter",  # NOT a compelled route
         )
-        bss._score_via_llm_judge(
-            [dict(self.DOC)], default_spec=bss.JUDGE_LLM_DEFAULT_SPEC
+        with pytest.raises(RuntimeError, match="not a compelled path"):
+            bss._score_via_llm_judge([dict(self.DOC)], group="low")
+
+    def test_degraded_route_is_allowed_and_logged(self, bss, monkeypatch, capsys):
+        """egress_proxy IS a compelled route (registry-derived degrade path,
+        model-router-policy §5) — allowed, but logged as degraded."""
+        self._inject_fake_krepis(
+            monkeypatch, lambda **kw: self._result(self.RUBRIC_08),
+            route="egress_proxy",
         )
-        assert constructed[0].provider == "anthropic"
+        bss._score_via_llm_judge([dict(self.DOC)], group="low")
+        err = capsys.readouterr().err
+        assert "DEGRADED" in err
+
+    def test_router_unresolvable_becomes_runtime_error(self, bss, monkeypatch):
+        import sys as _sys
+        import types as _types
+
+        def boom(*a, **kw):
+            raise RuntimeError("registry has no member for group")
+
+        pkg = _types.ModuleType("krepis")
+        llm_mod = _types.ModuleType("krepis.llm")
+        llm_mod.LLMClient = lambda *a, **kw: None
+        cap_mod = _types.ModuleType("krepis.llm_capture")
+        cap_mod.capture_llm_call = lambda *a, **kw: None
+        router_mod = _types.ModuleType("krepis.router")
+        router_mod.resolve_group_spec = boom
+        pkg.llm, pkg.llm_capture, pkg.router = llm_mod, cap_mod, router_mod
+        monkeypatch.setitem(_sys.modules, "krepis", pkg)
+        monkeypatch.setitem(_sys.modules, "krepis.llm", llm_mod)
+        monkeypatch.setitem(_sys.modules, "krepis.llm_capture", cap_mod)
+        monkeypatch.setitem(_sys.modules, "krepis.router", router_mod)
+
+        with pytest.raises(RuntimeError, match="did not resolve"):
+            bss._score_via_llm_judge([dict(self.DOC)], group="low")
 
     def test_classify_failure_falls_back_to_zero(self, bss, monkeypatch):
-        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-real")
-        monkeypatch.delenv(bss.JUDGE_LLM_ENV, raising=False)
-
         def complete(**kw):
             raise RuntimeError("rate limit")
 
         self._inject_fake_krepis(monkeypatch, complete)
         scores = bss._score_via_llm_judge(
             [{"id": 1, "title": "A", "content": "x", "content_type": "preference"}],
-            default_spec=bss.JUDGE_LLM_DEFAULT_SPEC,
+            group="low",
         )
         assert scores[1] == 0.0  # fallback, doesn't crash the run
 
     def test_missing_dims_default_to_neutral(self, bss, monkeypatch):
         """When the rubric JSON is missing a dimension, the caller
         defaults it to 3 (neutral). Score = (5 + 1 + 3 + 3) / 4 / 5 = 0.6"""
-        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-real")
-        monkeypatch.delenv(bss.JUDGE_LLM_ENV, raising=False)
         self._inject_fake_krepis(
             monkeypatch,
             lambda **kw: self._result('{"generality": 5, "durability": 1}'),
         )
-        scores = bss._score_via_llm_judge(
-            [dict(self.DOC)], default_spec=bss.JUDGE_LLM_DEFAULT_SPEC
-        )
+        scores = bss._score_via_llm_judge([dict(self.DOC)], group="low")
         assert scores[1] == pytest.approx(0.6)
 
     def test_sft_capture_invoked_per_call(self, bss, monkeypatch):
-        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-real")
-        monkeypatch.delenv(bss.JUDGE_LLM_ENV, raising=False)
         captured = []
         self._inject_fake_krepis(
             monkeypatch, lambda **kw: self._result(self.RUBRIC_08),
             captured=captured,
         )
-        bss._score_via_llm_judge(
-            [dict(self.DOC)], default_spec=bss.JUDGE_LLM_DEFAULT_SPEC
-        )
+        bss._score_via_llm_judge([dict(self.DOC)], group="low")
         assert len(captured) == 1
         _result_obj, kw = captured[0]
         assert kw["producer"] == "mnemon_judge"
         assert kw["meta"]["memory_id"] == 1
         assert kw["meta"]["score"] == pytest.approx(0.8)
+
+    def test_pre_fix_regressions(self, bss, monkeypatch):
+        """Pins the two defects fixed by the 2026-08-29 router migration.
+        Both assertions FAIL against the pre-fix source (verified by
+        running this test against a checkout of the pre-fix file: the old
+        ``LLMClient(spec)`` call has no ``callsite_id`` kwarg at all, and
+        ``JUDGE_LLM_ANTHROPIC_SPEC`` / ``--judge anthropic`` reached
+        ``anthropic:claude-haiku-4-5-20251001`` directly with no router
+        involved)."""
+        # 1. callsite_id is now a hard requirement of the real krepis
+        #    LLMClient contract (krepis>=0.59) — the fake enforces it, and
+        #    the happy path above only passes because build_standing_set.py
+        #    now supplies one. Prove the attribute exists on the module's
+        #    real call by constructing the fake directly the way the
+        #    pre-fix code did (positional-only, no callsite_id):
+        import sys as _sys
+        import types as _types
+
+        constructed, _ = self._inject_fake_krepis(
+            monkeypatch, lambda **kw: self._result("{}"),
+        )
+        fake_llm_mod = _sys.modules["krepis.llm"]
+        with pytest.raises(TypeError, match="callsite_id"):
+            fake_llm_mod.LLMClient(_types.SimpleNamespace(provider="x", model="y"))
+
+        # 2. The anthropic back-compat constant/CLI choice no longer exists.
+        assert not hasattr(bss, "JUDGE_LLM_ANTHROPIC_SPEC")
+        assert not hasattr(bss, "JUDGE_LLM_DEFAULT_SPEC")
+        assert not hasattr(bss, "JUDGE_LLM_ENV")
+
+        # 3. The old direct-pin env var is refused with a migration message
+        #    rather than silently honored.
+        monkeypatch.setenv("MNEMON_JUDGE_LLM", "anthropic:claude-haiku-4-5-20251001")
+        import io as _io
+        import contextlib as _contextlib
+        stderr_buf = _io.StringIO()
+        old_argv = _sys.argv
+        _sys.argv = ["build_standing_set.py", "--print-only"]
+        try:
+            with _contextlib.redirect_stderr(stderr_buf):
+                rc = bss.main()
+        finally:
+            _sys.argv = old_argv
+        assert rc == 2
+        assert "MNEMON_JUDGE_LLM is retired" in stderr_buf.getvalue()
