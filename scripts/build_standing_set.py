@@ -191,19 +191,113 @@ VAULT_EXEMPLAR_DEFAULT_COUNT = 15
 VAULT_POSITIVE_CONFIDENCE_FLOOR = 0.80
 
 # LLM-judge constants (added 2026-05-27 per ROADMAP P2 follow-up;
-# provider-agnostic via krepis 2026-07-03). Opt-in via --judge llm (or the
-# back-compat --judge anthropic). Default remains the embedding scorer
-# (zero new deps, public-release-friendly).
+# provider-agnostic via krepis 2026-07-03; migrated onto the krepis
+# model-GROUP router 2026-08-29 (mnemon-I<N>) per Brian's 2026-08-29 ruling
+# that the entire fleet routes through the krepis router with no parallel
+# setups, and that direct Anthropic API use is retired fleet-wide. The
+# previous version of this constant block pinned a literal "provider:model"
+# spec string (bypassing the registry's group/fallback layer) and carried a
+# "--judge anthropic" back-compat alias that called the Anthropic API
+# directly — both are policy violations under the 2026-08-29 rulings and
+# are removed, not merely defaulted-off.
 #
-# The judge model is CONFIG, not code: MNEMON_JUDGE_LLM env accepts
-# "provider:model" or a krepis ModelSpec JSON. Defaults: --judge llm runs
-# an open-weight model via OpenRouter (cheap, ~$0.10/$0.18 per MTok);
-# --judge anthropic keeps the original Haiku judge. Either way the flip
-# is an env-var edit, never a code change.
-JUDGE_LLM_ENV = "MNEMON_JUDGE_LLM"
-JUDGE_LLM_DEFAULT_SPEC = "openrouter:deepseek/deepseek-v4-flash:floor"
-JUDGE_LLM_ANTHROPIC_SPEC = "anthropic:claude-haiku-4-5-20251001"
+# Opt-in via --judge llm. Default remains the embedding scorer (zero new
+# deps, public-release-friendly).
+#
+# The judge model is a REGISTRY GROUP, not a pinned model: MNEMON_JUDGE_GROUP
+# selects one of krepis's model_groups (low / med / high / ultra — see
+# alpha-engine-config/private-docs/LLM_MODEL_REGISTRY.yaml). krepis resolves
+# the group to a live member — with cross-provider fallback and fail-closed
+# refusal of any non-compelled route (model-router-policy §5) — so a
+# provider outage or account exhaustion degrades within the registry rather
+# than needing a code or spec-string change here. Default "low": this judge
+# task (a mechanical structured-rubric score) matches the flash-tier
+# mechanical/deterministic tier, mirroring the original cheap-flash default.
+JUDGE_GROUP_ENV = "MNEMON_JUDGE_GROUP"
+JUDGE_GROUP_DEFAULT = "low"
 JUDGE_MAX_TOKENS = 300
+
+
+class RouterUnresolvable(RuntimeError):
+    """The configured judge ``model_group`` could not be resolved to a
+    callable endpoint through the krepis router.
+
+    A distinct type (mirrors ``flow_doctor.core.router.RouterUnresolvable``
+    / ``morning_signal.claude.RouterGroupUnresolvable`` — model-router-policy
+    R20) so callers never mistake "the router could not be reached" for "the
+    router was reached and declined": either way, the LLM call did not
+    happen at all.
+    """
+
+
+#: Routes a judge call may be served on — the COMPELLED PATHS, per
+#: `model-router-policy.md` §5, mirroring
+#: `flow_doctor.core.router.COMPELLED_ROUTES` and
+#: `morning_signal.claude._COMPELLED_ROUTES`. Anything else (a bare
+#: `openrouter`/`anthropic` direct route chosen by krepis's own fallback) is
+#: refused: alpha-engine-config-I6367 forbids direct-OpenRouter linkage, and
+#: the direct-Anthropic API budget is $0 (2026-07-17 ruling, reaffirmed
+#: 2026-08-29).
+_COMPELLED_ROUTES = frozenset({"litellm_proxy", "egress_proxy"})
+
+
+def _resolve_judge_router_edge(group: str, *, max_tokens: int):
+    """Resolve *group* to a callable ``ModelSpec`` via the krepis router.
+
+    Mirrors ``flow_doctor.core.router.resolve_router_edge`` — the same
+    resolve → check-compelled-route → degrade-if-not-primary shape, kept in
+    sync by hand for now (candidate for lifting into ``nousergon-lib`` on a
+    third adoption per ``policy-shared-code``; tracked in the same issue as
+    this migration).
+
+    Never falls back to a direct provider or a caller-pinned model on
+    failure — raises :class:`RouterUnresolvable` instead (fail closed, R20).
+    """
+    try:
+        from krepis.router import resolve_group_spec
+    except ImportError as e:
+        raise RouterUnresolvable(
+            "--judge llm requires the `krepis` adapter. Install via "
+            "`pip install 'mnemon-memory[judge]'`, or use --judge "
+            "embedding (default)."
+        ) from e
+
+    # Declared, never inferred (model-router-policy R29).
+    exec_context = os.environ.get("KREPIS_EXEC_CONTEXT") or None
+    try:
+        spec, route = resolve_group_spec(
+            group,
+            exec_context=exec_context,
+            # The router edge speaks OpenAI-compatible chat completions.
+            wire="openai",
+            max_tokens=max_tokens,
+        )
+    except Exception as exc:
+        raise RouterUnresolvable(
+            f"judge model_group {group!r} did not resolve "
+            f"(exec_context={exec_context!r}): {exc}"
+        ) from exc
+
+    resolved_route = route.get("route")
+    if resolved_route not in _COMPELLED_ROUTES:
+        raise RouterUnresolvable(
+            f"judge model_group {group!r} resolved to route "
+            f"{resolved_route!r} (provider={spec.provider!r}), which is "
+            f"not a compelled path — refusing to call a direct provider "
+            f"chosen by fallback (alpha-engine-config-I6367). Compelled "
+            f"routes: {sorted(_COMPELLED_ROUTES)}"
+        )
+    if resolved_route != "litellm_proxy":
+        print(
+            f"# DEGRADED: judge model_group {group!r} resolved to route "
+            f"{resolved_route!r} (provider={spec.provider!r} model="
+            f"{spec.model!r}) rather than the authenticated edge — the "
+            f"edge's health probe did not pass. This is the registry-"
+            f"derived degraded route (model-router-policy §5), still a "
+            f"compelled path.",
+            file=sys.stderr,
+        )
+    return spec
 # SFT trace sink for the distillation corpus (rows written only when
 # LLM_SFT_CAPTURE_ENABLED / ALPHA_ENGINE_DECISION_CAPTURE_ENABLED is set).
 JUDGE_SFT_SINK_ENV = "MNEMON_JUDGE_SFT_SINK"
@@ -334,18 +428,22 @@ def _sample_vault_exemplars(
     return [_fmt(r) for r in pos_rows], [_fmt(r) for r in neg_rows]
 
 
-def _score_via_llm_judge(docs: list[dict], *, default_spec: str) -> dict[int, float]:
+def _score_via_llm_judge(docs: list[dict], *, group: str) -> dict[int, float]:
     """Score each memory's 'constraint-ness' via an LLM rubric judge.
 
     Returns {doc_id: score_in_0_to_1} — rubric mean over the 4
     JUDGE_RUBRIC_DIMENSIONS normalized to [0.2, 1.0] (raw range
     1-5 / 5 = 0.2-1.0).
 
-    Provider-agnostic via the krepis adapter: the judge model resolves
-    from the ``MNEMON_JUDGE_LLM`` env var ("provider:model" or a
-    ModelSpec JSON), falling back to ``default_spec`` (``--judge llm`` →
-    an open-weight model via OpenRouter; ``--judge anthropic`` → the
-    original Haiku judge). Swapping providers is an env edit, never code.
+    Routed via the krepis model-group router (model-router-policy §2):
+    *group* (from ``MNEMON_JUDGE_GROUP``, default ``"low"``) resolves to a
+    live registry member through ``krepis.router.resolve_group_spec``, with
+    cross-provider fallback and fail-closed refusal of any route outside
+    the compelled set (``_resolve_judge_router_edge`` /
+    :class:`RouterUnresolvable`). Swapping the tier is an env edit or
+    ``--judge`` invocation, never a pinned model string in this file — a
+    pinned string is exactly the parallel-routing shape the 2026-08-29
+    "everything funnels through the krepis router" ruling forbids.
 
     Per-memory rationale is printed to stderr for audit; the existing
     scoring pipeline downstream only consumes the scalar score, so the
@@ -356,11 +454,11 @@ def _score_via_llm_judge(docs: list[dict], *, default_spec: str) -> dict[int, fl
 
     Activation requirements:
       - ``krepis`` must be importable (operator-side install:
-        ``pip install 'mnemon-memory[judge]'`` or
-        ``pip install 'krepis[anthropic,openai]'``).
-      - The resolved provider's API key env var must be set
-        (``OPENROUTER_API_KEY`` for the default; ``ANTHROPIC_API_KEY``
-        for --judge anthropic).
+        ``pip install 'mnemon-memory[judge]'``).
+      - *group* must resolve through the router to a compelled route
+        (``litellm_proxy`` or ``egress_proxy``) — credential resolution is
+        the router's responsibility (SSM/env, per model-router-policy),
+        never a key this script reads directly.
 
     Raises ``RuntimeError`` with operator-facing instructions if either
     requirement is missing — fail loud per the no-silent-fail rule.
@@ -368,7 +466,6 @@ def _score_via_llm_judge(docs: list[dict], *, default_spec: str) -> dict[int, fl
     try:
         from krepis.llm import LLMClient
         from krepis.llm_capture import capture_llm_call
-        from krepis.llm_config import parse_model_spec
     except ImportError as e:
         raise RuntimeError(
             "--judge llm requires the `krepis` adapter. Install via "
@@ -376,26 +473,20 @@ def _score_via_llm_judge(docs: list[dict], *, default_spec: str) -> dict[int, fl
             "embedding (default)."
         ) from e
 
-    spec_value = os.environ.get(JUDGE_LLM_ENV) or default_spec
-    spec = parse_model_spec(spec_value, source=f"env {JUDGE_LLM_ENV} / default")
-    key_env = spec.resolved_api_key_env()
-    if not os.environ.get(key_env):
-        raise RuntimeError(
-            f"--judge llm resolved to {spec.provider}:{spec.model}, which "
-            f"requires the {key_env} env var. Set it, point "
-            f"{JUDGE_LLM_ENV} at a provider you have a key for, or use "
-            f"--judge embedding (default)."
-        )
+    try:
+        spec = _resolve_judge_router_edge(group, max_tokens=JUDGE_MAX_TOKENS)
+    except RouterUnresolvable as exc:
+        raise RuntimeError(str(exc)) from exc
 
-    client = LLMClient(spec)
+    client = LLMClient(spec, callsite_id="mnemon.build_standing_set.judge")
     sft_sink = os.environ.get(JUDGE_SFT_SINK_ENV) or str(
         Path.home() / ".mnemon" / "sft" / "judge.jsonl"
     )
     scores: dict[int, float] = {}
 
     print(
-        f"# LLM-judge scoring {len(docs)} memories via "
-        f"{spec.provider}:{spec.model} ...",
+        f"# LLM-judge scoring {len(docs)} memories via group={group!r} "
+        f"({spec.provider}:{spec.model}) ...",
         file=sys.stderr,
     )
     for d in docs:
@@ -597,7 +688,10 @@ def _render_block(memories: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
-def main() -> int:
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Build the CLI parser. Extracted from :func:`main` so tests can
+    exercise argument validation (e.g. that the retired ``--judge
+    anthropic`` choice is refused) without running the full pipeline."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--db", default=None, help="direct sqlite path")
     ap.add_argument("--vault", default=None, help="vault dir (default: ~/.mnemon)")
@@ -622,19 +716,37 @@ def main() -> int:
                     help=f"how many vault exemplars to sample per class (positive + negative) "
                          f"when --exemplar-source ∈ {{hybrid, vault}} (default: "
                          f"{VAULT_EXEMPLAR_DEFAULT_COUNT})")
-    ap.add_argument("--judge", choices=("embedding", "llm", "anthropic"),
+    ap.add_argument("--judge", choices=("embedding", "llm"),
                     default="embedding",
                     help="constraint-score backend: 'embedding' (default, no deps — "
                          "max cosine vs exemplars) or 'llm' (opt-in higher-fidelity "
-                         "rubric scoring via the krepis adapter; model from the "
-                         f"{JUDGE_LLM_ENV} env var, default {JUDGE_LLM_DEFAULT_SPEC}; "
-                         "requires `pip install 'mnemon-memory[judge]'` + the resolved "
-                         "provider's API key env var). 'anthropic' is the back-compat "
-                         "alias that defaults the judge to the original Haiku model. "
-                         "LLM-judge replaces the embedding "
-                         "constraint signal only; correction/contradiction/breadth/time "
-                         "signals remain.")
+                         "rubric scoring, routed through the krepis model-group "
+                         f"router; tier from the {JUDGE_GROUP_ENV} env var, default "
+                         f"{JUDGE_GROUP_DEFAULT!r} — one of the registry's low/med/"
+                         "high/ultra groups, never a pinned model. Requires "
+                         "`pip install 'mnemon-memory[judge]'`. LLM-judge replaces "
+                         "the embedding constraint signal only; correction/"
+                         "contradiction/breadth/time signals remain. Direct-provider "
+                         "specs and the old 'anthropic' alias are retired — see "
+                         "mnemon-I<N> — the judge always resolves through the "
+                         "router.")
+    return ap
+
+
+def main() -> int:
+    ap = build_arg_parser()
     args = ap.parse_args()
+
+    if os.environ.get("MNEMON_JUDGE_LLM"):
+        print(
+            "ERROR: MNEMON_JUDGE_LLM is retired (it pinned a direct "
+            "'provider:model' spec, bypassing the krepis router). Set "
+            f"{JUDGE_GROUP_ENV} to a registry group (low/med/high/ultra) "
+            "instead, or unset it to use the default "
+            f"{JUDGE_GROUP_DEFAULT!r}.",
+            file=sys.stderr,
+        )
+        return 2
 
     if args.top > HARD_CEILING:
         print(f"ERROR: --top {args.top} exceeds the hard ceiling of {HARD_CEILING} "
@@ -761,16 +873,13 @@ def main() -> int:
     time_raw = dict(zip(embedded_ids, _cosine_max(memory_vecs, time_emb).tolist()))
 
     # Constraint signal: --judge picks embedding (default) or an LLM judge
-    # ('llm' = provider-agnostic via krepis, default open-weight model on
-    # OpenRouter; 'anthropic' = back-compat alias for the original Haiku
-    # judge). Aborts with instructions if LLM-judge activation fails.
-    if args.judge in ("llm", "anthropic"):
-        default_spec = (
-            JUDGE_LLM_ANTHROPIC_SPEC if args.judge == "anthropic"
-            else JUDGE_LLM_DEFAULT_SPEC
-        )
+    # ('llm' = routed through the krepis model-group router, tier from
+    # MNEMON_JUDGE_GROUP, default "low"). Aborts with instructions if
+    # LLM-judge activation or router resolution fails.
+    if args.judge == "llm":
+        group = os.environ.get(JUDGE_GROUP_ENV) or JUDGE_GROUP_DEFAULT
         try:
-            constraint_raw = _score_via_llm_judge(docs, default_spec=default_spec)
+            constraint_raw = _score_via_llm_judge(docs, group=group)
         except RuntimeError as exc:
             print(f"# ERROR: {exc}", file=sys.stderr)
             return 2

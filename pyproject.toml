@@ -48,10 +48,12 @@ llm = [
     "huggingface-hub>=0.20",
 ]
 # Operator-side LLM-judge backend for scripts/build_standing_set.py
-# (--judge llm). krepis is the provider-agnostic adapter: the judge model
-# is config (MNEMON_JUDGE_LLM env, "provider:model"), defaulting to an
-# open-weight model via OpenRouter with Anthropic as a config flip.
-judge = ["krepis[anthropic,openai]>=0.9.0"]
+# (--judge llm). krepis is the provider-agnostic router adapter: the judge
+# tier is config (MNEMON_JUDGE_GROUP env — low/med/high/ultra, resolved
+# through krepis.router.resolve_group_spec), never a pinned provider or
+# model string. Direct-Anthropic is retired fleet-wide (2026-08-29 ruling)
+# so only the `openai`-compatible transport extra is needed here.
+judge = ["krepis[openai]>=0.59.0"]
 ui = [
     "streamlit>=1.30",
     "plotly>=5.18",
